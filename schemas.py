@@ -1,43 +1,77 @@
+from typing import Annotated, List, Literal, Optional, Sequence, TypedDict
 
-from pydantic import BaseModel, Field
-from typing import List, Literal, Any, Optional
+from langgraph.graph import MessagesState
+from pydantic import BaseModel, Field, create_model
 
 
-class ArgumentPair(BaseModel):
-    key: str = Field(description="Parameter name, e.g. 'recipient', 'max_results', or 'question'")
-    value: str = Field(description="Parameter value as a string")
+# ---------- Planner output ----------
 
-class Task(BaseModel):
-    step_id: int
-    title: str = Field(description="Short human-readable action (e.g., 'Fetch unread messages')")
-    tool_name: Literal["check_inbox", "send_email", "ask_user", "final_response", "generate_email"]
-    arguments: List[ArgumentPair] = Field(
+class SubTask(BaseModel):
+    id: str = Field(description="Short unique id, e.g. 't1', 't2'")
+    agent: str = Field(description="Sub-agent that executes this task.")
+    title: str = Field(description="Short human-readable action (e.g. 'Fetch unread messages')")
+    instruction: str = Field(
+        description="Self-contained instruction for the sub-agent, including every detail it needs."
+    )
+    depends_on: List[str] = Field(
         default_factory=list,
-        description="List of key-value parameter pairs for the tool."
+        description="Ids of tasks whose output this task needs. Empty if it can run immediately.",
     )
 
-class PlanResponse(BaseModel):
+
+class Plan(BaseModel):
     needs_clarification: bool = Field(
-        description="Set to true if critical parameters are missing and an ask_user step is required."
+        description="True if critical information is missing and cannot be obtained from the inbox."
     )
-    plan: List[Task]
+    question: Optional[str] = Field(
+        default=None, description="Question for the user when needs_clarification is true."
+    )
+    tasks: List[SubTask] = Field(default_factory=list)
 
-class EmailStructure(BaseModel):
-    recipient: str = Field(description="Target email address")
-    subject: str = Field(description="Concise email subject line")
-    body: str = Field(description="Complete, well-formatted body content")
 
-class VerificationResult(BaseModel):
-    is_valid: bool = Field(
-        description="True if all parameters are real, supplied by the user, and safe to execute."
+def plan_schema(agent_names: Sequence[str]) -> type[Plan]:
+    """Plan schema whose SubTask.agent is restricted to the registered sub-agent names,
+    so the LLM's structured output can only pick sub-agents that exist."""
+    task_model = create_model(
+        "SubTask",
+        __base__=SubTask,
+        agent=(Literal[tuple(agent_names)], Field(description="Sub-agent that executes this task.")),
     )
-    issue_type: Literal["none", "missing_information", "hallucinated_data", "unsafe_action"] = Field(
-        description="Category of the flaw if is_valid is False."
-    )
-    question_for_user: Optional[str] = Field(
-        default=None,
-        description="If information is missing or fake (like a placeholder email), phrase the question to ask the user."
-    )
-    critique: str = Field(
-        description="Detailed explanation of why the plan passed or failed verification."
-    )
+    return create_model("Plan", __base__=Plan, tasks=(List[task_model], Field(default_factory=list)))
+
+
+# ---------- HITL ----------
+
+class EmailDraft(BaseModel):
+    recipient: str
+    subject: str
+    body: str
+
+
+class ReviewDecision(TypedDict, total=False):
+    """Value the human sends back through Command(resume=...)."""
+    action: Literal["approve", "edit", "revise", "reject"]
+    draft: dict      # edited draft, for action == "edit"
+    feedback: str    # requested changes, for action == "revise"
+
+
+# ---------- Graph state ----------
+
+def merge_results(left: list, right: Optional[list]) -> list:
+    """Append worker results; a None update resets the list for a new turn."""
+    if right is None:
+        return []
+    return (left or []) + right
+
+
+class OfficeState(MessagesState):
+    signature: Optional[str]
+    plan: List[dict]
+    results: Annotated[List[dict], merge_results]
+
+
+class WorkerState(TypedDict):
+    task: dict
+    request: str
+    context: List[dict]
+    signature: Optional[str]

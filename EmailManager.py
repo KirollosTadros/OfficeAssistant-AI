@@ -89,6 +89,34 @@ class EmailManager:
         mail.logout()
         return messages
             
+    def read_email(self, email_id: str) -> Dict:
+        """Fetch the full content of one inbox message by the id returned from check_inbox."""
+        self._validate_credentials()
+        mail = imaplib.IMAP4_SSL("imap.gmail.com")
+        mail.login(self.EMAIL_USER, self.EMAIL_PASS)
+        mail.select("INBOX")
+
+        status, msg_data = mail.fetch(str(email_id), "(RFC822)")
+        mail.logout()
+        if status != "OK" or not msg_data or msg_data[0] is None:
+            return {"error": f"Email with id {email_id} not found."}
+
+        raw = email.message_from_bytes(msg_data[0][1])
+
+        subject_header = raw.get("Subject", "")
+        subject, encoding = decode_header(subject_header)[0]
+        if isinstance(subject, bytes):
+            subject = subject.decode(encoding or "utf-8", errors="ignore")
+
+        return {
+            "id": str(email_id),
+            "from": raw.get("From"),
+            "to": raw.get("To"),
+            "date": raw.get("Date"),
+            "subject": subject,
+            "body": extract_body(raw)[:8000],
+        }
+
     def save_draft(self, recipient: str, subject: str, body: str) -> Dict:
         self._validate_credentials()
         msg = EmailMessage()
